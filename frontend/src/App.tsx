@@ -60,37 +60,52 @@ export default function App() {
   const [threads, setThreads] = useState(8);
   const [speedLimit, setSpeedLimit] = useState(0); // 0 = unlimited
 
-  // Fetch / Poll updates from engine
+  const fetchTasks = async () => {
+    try {
+      const res = await fetch('http://127.0.0.1:19890/api/tasks');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setTasks((prev) => {
+            const map = new Map(prev.map((t) => [t.id, t]));
+            return data.map((t: Task) => ({
+              ...t,
+              speed: map.get(t.id)?.speed || 0,
+              chunks: map.get(t.id)?.chunks || []
+            }));
+          });
+        }
+      }
+    } catch {
+      // offline / not connected
+    }
+  };
+
   useEffect(() => {
-    // SSE listener for real-time downloads from browser extension or engine
+    fetchTasks();
+
+    // SSE listener for real-time downloads from Go engine
     const eventSource = new EventSource('http://127.0.0.1:19890/api/events');
     eventSource.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (payload.url) {
-          // Auto add task to UI
-          setTasks((prev) => [
-            {
-              id: Math.random().toString(36).substring(2, 9),
-              url: payload.url,
-              filename: payload.filename || 'download.bin',
-              filePath: 'C:/Downloads/' + (payload.filename || 'download.bin'),
-              totalBytes: 104857600, // sample 100MB
-              downloaded: 0,
-              status: 'downloading',
-              connections: 8,
-              category: 'Other',
-              speed: 2500000,
-              chunks: Array.from({ length: 8 }, (_, i) => ({
-                idx: i,
-                startOffset: i * 13107200,
-                endOffset: (i + 1) * 13107200 - 1,
-                downloaded: 0,
-                done: false
-              }))
-            },
-            ...prev
-          ]);
+        if (payload.type === 'progress') {
+          setTasks((prev) =>
+            prev.map((t) => {
+              if (t.id === payload.id) {
+                return {
+                  ...t,
+                  downloaded: payload.downloaded,
+                  speed: payload.speed,
+                  chunks: payload.chunks,
+                  status: payload.status
+                };
+              }
+              return t;
+            })
+          );
+        } else if (payload.type === 'new_task') {
+          fetchTasks();
         }
       } catch (err) {
         console.error(err);
@@ -98,38 +113,6 @@ export default function App() {
     };
 
     return () => eventSource.close();
-  }, []);
-
-  // Demo progress simulation loop for visual metrics
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (t.status !== 'downloading') return t;
-          const chunkAdd = Math.floor(Math.random() * 400000) + 100000;
-          let newDownloaded = t.downloaded + chunkAdd * (t.chunks?.length || 1);
-          if (t.totalBytes > 0 && newDownloaded >= t.totalBytes) {
-            newDownloaded = t.totalBytes;
-            return { ...t, downloaded: newDownloaded, status: 'completed', speed: 0 };
-          }
-          const updatedChunks = t.chunks?.map((c) => {
-            const added = Math.min(chunkAdd, c.endOffset - c.startOffset - c.downloaded);
-            return {
-              ...c,
-              downloaded: c.downloaded + added,
-              done: c.downloaded + added >= c.endOffset - c.startOffset
-            };
-          });
-          return {
-            ...t,
-            downloaded: newDownloaded,
-            speed: chunkAdd * (t.chunks?.length || 1),
-            chunks: updatedChunks
-          };
-        })
-      );
-    }, 1000);
-    return () => clearInterval(interval);
   }, []);
 
   const totalSpeed = tasks
@@ -141,54 +124,56 @@ export default function App() {
     return t.category.toLowerCase() === selectedCategory.toLowerCase();
   });
 
-  const handleAddDownload = () => {
+  const handleAddDownload = async () => {
     if (!urlInput) return;
-    const filename = urlInput.split('/').pop()?.split('?')[0] || 'file.bin';
-    const totalBytes = 52428800; // 50MB dummy
-    const chunkSize = Math.floor(totalBytes / threads);
-
-    const newTask: Task = {
-      id: Math.random().toString(36).substring(2, 9),
-      url: urlInput,
-      filename: filename,
-      filePath: `C:/Downloads/${filename}`,
-      totalBytes: totalBytes,
-      downloaded: 0,
-      status: 'downloading',
-      connections: threads,
-      category: 'Compressed',
-      speed: 1500000,
-      chunks: Array.from({ length: threads }, (_, i) => ({
-        idx: i,
-        startOffset: i * chunkSize,
-        endOffset: i === threads - 1 ? totalBytes - 1 : (i + 1) * chunkSize - 1,
-        downloaded: 0,
-        done: false
-      }))
-    };
-
-    setTasks([newTask, ...tasks]);
-    setUrlInput('');
-    setIsAddOpen(false);
+    try {
+      await fetch('http://127.0.0.1:19890/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: urlInput,
+          connections: threads
+        })
+      });
+      setUrlInput('');
+      setIsAddOpen(false);
+      fetchTasks();
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const togglePause = (id: string) => {
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id === id) {
-          return {
-            ...t,
-            status: t.status === 'downloading' ? 'paused' : 'downloading',
-            speed: t.status === 'downloading' ? 0 : 1500000
-          };
-        }
-        return t;
-      })
-    );
+  const togglePause = async (t: Task) => {
+    const action = t.status === 'downloading' ? 'pause' : 'resume';
+    try {
+      await fetch(`http://127.0.0.1:19890/api/tasks/${t.id}/${action}`, {
+        method: 'POST'
+      });
+      fetchTasks();
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const removeTask = (id: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== id));
+  const removeTask = async (id: string) => {
+    try {
+      await fetch(`http://127.0.0.1:19890/api/tasks/${id}`, {
+        method: 'DELETE'
+      });
+      setTasks((prev) => prev.filter((t) => t.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSpeedLimitChange = (val: number) => {
+    setSpeedLimit(val);
+    const bytesPerSec = val > 0 ? val * 1024 * 1024 : 0;
+    fetch('http://127.0.0.1:19890/api/limiter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bytesPerSec })
+    }).catch(console.error);
   };
 
   return (
@@ -269,7 +254,7 @@ export default function App() {
               min="0"
               max="50"
               value={speedLimit}
-              onChange={(e) => setSpeedLimit(Number(e.target.value))}
+              onChange={(e) => handleSpeedLimitChange(Number(e.target.value))}
               className="w-20 accent-sky-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
             />
           </div>
@@ -290,7 +275,7 @@ export default function App() {
           <div className="flex items-center gap-4 text-xs text-slate-400">
             <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
               <HardDrive className="w-4 h-4 text-sky-400" />
-              <span>Free Disk: 142.8 GB</span>
+              <span>Free Disk: Multi-Part Turbo</span>
             </div>
           </div>
         </header>
@@ -325,7 +310,7 @@ export default function App() {
                     <div className="flex items-center gap-2">
                       {t.status !== 'completed' && (
                         <button
-                          onClick={() => togglePause(t.id)}
+                          onClick={() => togglePause(t)}
                           className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
                         >
                           {t.status === 'downloading' ? (

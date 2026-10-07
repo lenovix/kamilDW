@@ -14,9 +14,10 @@ func TestServerDownloadFlow(t *testing.T) {
 	done := make(chan struct{})
 
 	s := New("127.0.0.1:0")
-	s.OnDownload = func(p DownloadPayload) {
+	s.OnDownload = func(p DownloadPayload) (string, error) {
 		received = p
 		close(done)
+		return "task-123", nil
 	}
 	s.addr = "127.0.0.1:0"
 

@@ -56,11 +56,60 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 			Downloaded: p.Downloaded,
 			Status:     status,
 		})
+		srv.ext.Broadcast(map[string]any{
+			"type":       "progress",
+			"id":         taskID,
+			"downloaded": p.Downloaded,
+			"total":      p.Total,
+			"speed":      p.Speed,
+			"chunks":     p.Chunks,
+			"status":     status,
+		})
 	}
 
 	srv.ext = extserver.New("127.0.0.1:19890")
-	srv.ext.OnDownload = func(payload extserver.DownloadPayload) {
-		_, _ = srv.AddDownload(payload.URL, payload.Filename, 8)
+	srv.ext.OnDownload = func(payload extserver.DownloadPayload) (string, error) {
+		conn := payload.Connections
+		if conn <= 0 {
+			conn = 8
+		}
+		return srv.AddDownload(payload.URL, payload.Filename, conn)
+	}
+	srv.ext.OnList = func(category string) (any, error) {
+		return srv.List(category)
+	}
+	srv.ext.OnPause = func(id string) bool {
+		return srv.Pause(id)
+	}
+	srv.ext.OnResume = func(id string) bool {
+		t, err := srv.db.GetTask(id)
+		if err != nil || t == nil {
+			return false
+		}
+		dbChunks, _ := srv.db.GetChunks(id)
+		var chunks []engine.Chunk
+		for _, c := range dbChunks {
+			chunks = append(chunks, engine.Chunk{
+				Idx:         c.Idx,
+				StartOffset: c.StartOffset,
+				EndOffset:   c.EndOffset,
+				Downloaded:  c.Downloaded,
+				Done:        c.Status == "done",
+			})
+		}
+		task := engine.Task{
+			ID:          t.ID,
+			URL:         t.URL,
+			FilePath:    t.FilePath,
+			TotalBytes:  t.TotalBytes,
+			Connections: t.Connections,
+			AcceptRange: t.AcceptRanges,
+		}
+		_ = srv.db.UpsertTask(store.TaskRecord{ID: id, Status: "downloading"})
+		return srv.eng.Start(context.Background(), task, chunks) == nil
+	}
+	srv.ext.OnSetSpeed = func(bytesPerSec int64) {
+		srv.limiter.SetRate(bytesPerSec)
 	}
 
 	srv.clip = clipboard.New(func(u string) {
