@@ -171,56 +171,82 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 	defer ts.wg.Done()
 	c := &ts.chunks[i]
 
-	start := c.StartOffset + c.Downloaded
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.task.URL, nil)
-	if err != nil {
-		return
-	}
-	if ts.task.TotalBytes > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, c.EndOffset))
-	}
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	buf := make([]byte, 128*1024)
-	var written int64
-	for {
-		if ts.paused.Load() {
-			<-ctx.Done()
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if ts.paused.Load() || ctx.Err() != nil {
 			return
 		}
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if e.limiter != nil {
-				if werr := e.limiter.Wait(ctx, n); werr != nil {
+
+		start := c.StartOffset + c.Downloaded
+		if start > c.EndOffset && c.EndOffset >= 0 {
+			c.Done = true
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.task.URL, nil)
+		if err != nil {
+			return
+		}
+		if ts.task.TotalBytes > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, c.EndOffset))
+		}
+
+		resp, err := e.client.Do(req)
+		if err != nil {
+			time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+			continue
+		}
+
+		buf := make([]byte, 128*1024)
+		var written int64
+		var readErr error
+		for {
+			if ts.paused.Load() {
+				resp.Body.Close()
+				return
+			}
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				if e.limiter != nil {
+					if werr := e.limiter.Wait(ctx, n); werr != nil {
+						resp.Body.Close()
+						return
+					}
+				}
+				if _, werr := ts.file.WriteAt(buf[:n], start+written); werr != nil {
+					resp.Body.Close()
+					return
+				}
+				written += int64(n)
+				c.Downloaded += int64(n)
+				ts.downloaded.Add(int64(n))
+				ts.speed.Add(uint64(n))
+				if start+written > c.EndOffset && c.EndOffset >= 0 {
+					c.Done = true
+					resp.Body.Close()
 					return
 				}
 			}
-			if _, werr := ts.file.WriteAt(buf[:n], start+written); werr != nil {
-				return
-			}
-			written += int64(n)
-			c.Downloaded += int64(n)
-			ts.downloaded.Add(int64(n))
-			ts.speed.Add(uint64(n))
-			if start+written > c.EndOffset {
+			if rerr != nil {
+				readErr = rerr
 				break
 			}
 		}
-		if rerr != nil {
-			if rerr == io.EOF {
-				c.Done = c.EndOffset < 0 || start+written > c.EndOffset
-			}
+		resp.Body.Close()
+
+		if readErr == io.EOF || (c.EndOffset >= 0 && start+written > c.EndOffset) {
+			c.Done = true
 			return
 		}
+
+		time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
 	}
-	c.Done = true
 }
 
 // reportLoop pushes Progress snapshots until ctx done.
