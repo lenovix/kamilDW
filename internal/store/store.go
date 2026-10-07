@@ -97,6 +97,11 @@ func (db *DB) GetTask(id string) (*TaskRecord, error) {
 	return &t, nil
 }
 
+func (db *DB) DeleteTask(id string) error {
+	_, err := db.Exec(`DELETE FROM tasks WHERE id = ?`, id)
+	return err
+}
+
 func (db *DB) ListTasks(category string) ([]TaskRecord, error) {
 	query := `SELECT id, url, filename, filepath, total_bytes, downloaded, status, connections, category, COALESCE(etag,''), accept_ranges, COALESCE(error,''), created_at, updated_at FROM tasks`
 	var args []any

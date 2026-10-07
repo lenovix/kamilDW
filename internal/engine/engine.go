@@ -27,6 +27,7 @@ type Task struct {
 	TotalBytes  int64
 	Connections int
 	AcceptRange bool
+	Headers     map[string]string
 }
 
 type Progress struct {
@@ -187,6 +188,9 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 		if err != nil {
 			return
 		}
+		for k, v := range ts.task.Headers {
+			req.Header.Set(k, v)
+		}
 		if ts.task.TotalBytes > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, c.EndOffset))
 		}
@@ -302,17 +306,14 @@ func (e *Engine) reportLoop(ctx context.Context, ts *taskState) {
 	}
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
-	var lastBytes, lastTick uint64
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-t.C:
-			cur := ts.speed.Swap(0)
-			_ = lastBytes
-			_ = lastTick
-			_ = cur
-			_ = now
+		case <-t.C:
+			if ts.paused.Load() {
+				return
+			}
 			p := e.progressOf(ts)
 			e.OnUpdate(ts.task.ID, p)
 		}

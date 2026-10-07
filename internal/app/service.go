@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,6 +110,10 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	srv.ext.OnSetSpeed = func(bytesPerSec int64) {
 		srv.limiter.SetRate(bytesPerSec)
 	}
+	srv.ext.OnDelete = func(id string) bool {
+		_ = srv.eng.Cancel(id)
+		return srv.db.DeleteTask(id) == nil
+	}
 
 	srv.clip = clipboard.New(func(u string) {
 		srv.ext.OnDownload(extserver.DownloadPayload{URL: u})
@@ -127,9 +130,17 @@ func (s *Service) StartServer() error {
 }
 
 func (s *Service) AddDownload(rawURL, filename string, connections int) (string, error) {
+	return s.AddDownloadWithHeaders(rawURL, filename, connections, nil)
+}
+
+func (s *Service) AddDownloadWithHeaders(rawURL, filename string, connections int, headers map[string]string) (string, error) {
 	total, acceptRanges, detectedName, err := engine.Probe(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("probe failed: %w", err)
+		total = 0
+		acceptRanges = false
+		if filename == "" {
+			detectedName = "video.mp4"
+		}
 	}
 
 	if filename == "" {
@@ -188,6 +199,7 @@ func (s *Service) AddDownload(rawURL, filename string, connections int) (string,
 		TotalBytes:  total,
 		Connections: len(chunks),
 		AcceptRange: acceptRanges,
+		Headers:     headers,
 	}
 
 	if err := s.eng.Start(context.Background(), t, chunks); err != nil {
