@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"kamildw/internal/clipboard"
 	"kamildw/internal/engine"
 	"kamildw/internal/extserver"
 	"kamildw/internal/limiter"
@@ -20,6 +21,7 @@ type Service struct {
 	eng       *engine.Engine
 	ext       *extserver.Server
 	limiter   *limiter.Bucket
+	clip      *clipboard.Listener
 	downloads string
 	mu        sync.Mutex
 }
@@ -60,6 +62,13 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	srv.ext.OnDownload = func(payload extserver.DownloadPayload) {
 		_, _ = srv.AddDownload(payload.URL, payload.Filename, 8)
 	}
+
+	srv.clip = clipboard.New(func(u string) {
+		srv.ext.OnDownload(extserver.DownloadPayload{URL: u})
+	})
+	_ = srv.clip.Start(context.Background())
+
+	eng.SetLimiter(srv.limiter)
 
 	return srv, nil
 }

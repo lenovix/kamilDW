@@ -36,10 +36,15 @@ type Progress struct {
 	Chunks     []Chunk
 }
 
+type RateLimiter interface {
+	Wait(ctx context.Context, n int) error
+}
+
 type Engine struct {
 	mu       sync.Mutex
 	tasks    map[string]*taskState
 	client   *http.Client
+	limiter  RateLimiter
 	OnUpdate func(TaskID string, p Progress)
 }
 
@@ -52,6 +57,12 @@ type taskState struct {
 	speed      atomic.Uint64
 	paused     atomic.Bool
 	wg         sync.WaitGroup
+}
+
+func (e *Engine) SetLimiter(l RateLimiter) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.limiter = l
 }
 
 func New() *Engine {
@@ -186,6 +197,11 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 		}
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if e.limiter != nil {
+				if werr := e.limiter.Wait(ctx, n); werr != nil {
+					return
+				}
+			}
 			if _, werr := ts.file.WriteAt(buf[:n], start+written); werr != nil {
 				return
 			}

@@ -32,4 +32,7 @@ func main() {
 
 	fmt.Println("kamilDW Core Engine started on 127.0.0.1:19890")
 	fmt.Printf("Database: %s\nDownloads: %s\n", dbPath, downloadDir)
+
+	_ = srv
+	select {}
 }

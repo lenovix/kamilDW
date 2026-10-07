@@ -39,6 +39,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/download", s.handleDownload)
 	mux.HandleFunc("/api/events", s.handleEvents)
 
+	fs := http.FileServer(http.Dir("./frontend/dist"))
+	mux.Handle("/", fs)
+
 	s.server = &http.Server{
 		Addr:    s.addr,
 		Handler: corsMiddleware(mux),
