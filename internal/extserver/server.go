@@ -23,6 +23,7 @@ type Server struct {
 	assetFS       http.FileSystem
 	OnDownload    func(payload DownloadPayload) (string, error)
 	OnList        func(category string) (any, error)
+	OnGetDB       func() (any, error)
 	OnPause       func(id string) bool
 	OnResume      func(id string) bool
 	OnDelete      func(id string) bool
@@ -53,6 +54,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/tasks/", s.handleTaskAction)
 	mux.HandleFunc("/api/limiter", s.handleLimiter)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/db", s.handleDB)
 
 	if s.assetFS != nil {
 		mux.Handle("/", http.FileServer(s.assetFS))
@@ -113,6 +115,20 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(list)
+}
+
+func (s *Server) handleDB(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.OnGetDB == nil {
+		json.NewEncoder(w).Encode(map[string]any{})
+		return
+	}
+	data, err := s.OnGetDB()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(data)
 }
 
 func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {

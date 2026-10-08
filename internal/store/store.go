@@ -97,7 +97,14 @@ func (db *DB) GetTask(id string) (*TaskRecord, error) {
 	return &t, nil
 }
 
+func (db *DB) UpdateProgress(id string, downloaded int64, status string, errStr string) error {
+	q := `UPDATE tasks SET downloaded = ?, status = ?, error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`
+	_, err := db.Exec(q, downloaded, status, errStr, id)
+	return err
+}
+
 func (db *DB) DeleteTask(id string) error {
+	_, _ = db.Exec(`DELETE FROM chunks WHERE task_id = ?`, id)
 	_, err := db.Exec(`DELETE FROM tasks WHERE id = ?`, id)
 	return err
 }
@@ -155,6 +162,24 @@ func (db *DB) SaveChunks(taskID string, chunks []ChunkRecord) error {
 
 func (db *DB) GetChunks(taskID string) ([]ChunkRecord, error) {
 	rows, err := db.Query(`SELECT id, task_id, idx, start_offset, end_offset, downloaded, status FROM chunks WHERE task_id = ? ORDER BY idx ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		if err := rows.Scan(&c.ID, &c.TaskID, &c.Idx, &c.StartOffset, &c.EndOffset, &c.Downloaded, &c.Status); err != nil {
+			return nil, err
+		}
+		res = append(res, c)
+	}
+	return res, nil
+}
+
+func (db *DB) ListAllChunks() ([]ChunkRecord, error) {
+	rows, err := db.Query(`SELECT id, task_id, idx, start_offset, end_offset, downloaded, status FROM chunks ORDER BY task_id ASC, idx ASC`)
 	if err != nil {
 		return nil, err
 	}

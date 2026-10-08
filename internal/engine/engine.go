@@ -450,6 +450,9 @@ func (e *Engine) Pause(taskID string) bool {
 func (e *Engine) Cancel(taskID string) bool {
 	e.mu.Lock()
 	ts, ok := e.tasks[taskID]
+	if ok {
+		delete(e.tasks, taskID)
+	}
 	e.mu.Unlock()
 	if !ok {
 		return false

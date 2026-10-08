@@ -9,7 +9,8 @@
     "webRequest",
     "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"

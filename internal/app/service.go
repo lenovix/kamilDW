@@ -47,6 +47,11 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	}
 
 	eng.OnUpdate = func(taskID string, p engine.Progress) {
+		// Jika task sudah dihapus dari DB, jangan broadcast progress lagi
+		if _, err := srv.db.GetTask(taskID); err != nil {
+			return // Task already deleted, skip
+		}
+
 		status := "downloading"
 		allDone := len(p.Chunks) > 0
 		for _, c := range p.Chunks {
@@ -65,11 +70,7 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 			}
 		}
 
-		_ = db.UpsertTask(store.TaskRecord{
-			ID:         taskID,
-			Downloaded: p.Downloaded,
-			Status:     status,
-		})
+		_ = db.UpdateProgress(taskID, p.Downloaded, status, p.Error)
 		srv.ext.Broadcast(map[string]any{
 			"type":       "progress",
 			"id":         taskID,
@@ -91,6 +92,20 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	}
 	srv.ext.OnList = func(category string) (any, error) {
 		return srv.List(category)
+	}
+	srv.ext.OnGetDB = func() (any, error) {
+		tasks, err := srv.db.ListTasks("")
+		if err != nil {
+			return nil, err
+		}
+		chunks, err := srv.db.ListAllChunks()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"tasks":  tasks,
+			"chunks": chunks,
+		}, nil
 	}
 	srv.ext.OnPause = func(id string) bool {
 		return srv.Pause(id)
@@ -127,7 +142,15 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	}
 	srv.ext.OnDelete = func(id string) bool {
 		_ = srv.eng.Cancel(id)
-		return srv.db.DeleteTask(id) == nil
+		err := srv.db.DeleteTask(id)
+		if err == nil {
+			srv.ext.Broadcast(map[string]any{
+				"type": "task_deleted",
+				"id":   id,
+			})
+			return true
+		}
+		return false
 	}
 
 	srv.clip = clipboard.New(func(u string) {
