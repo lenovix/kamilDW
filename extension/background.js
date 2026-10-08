@@ -85,7 +85,14 @@ async function sendToKamilDW(url, filename = "") {
     const resp = await fetch(SERVER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, filename })
+      body: JSON.stringify({
+        url,
+        filename,
+        headers: {
+          "User-Agent": navigator.userAgent,
+          "Referer": "https://www.youtube.com/"
+        }
+      })
     });
     return resp.ok;
   } catch (err) {

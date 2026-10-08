@@ -7,17 +7,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type Chunk struct {
-	Idx         int   `json:"idx"`
-	StartOffset int64 `json:"startOffset"`
-	EndOffset   int64 `json:"endOffset"` // inclusive
-	Downloaded  int64 `json:"downloaded"`
-	Done        bool  `json:"done"`
+	Idx         int    `json:"idx"`
+	StartOffset int64  `json:"startOffset"`
+	EndOffset   int64  `json:"endOffset"` // inclusive
+	Downloaded  int64  `json:"downloaded"`
+	Done        bool   `json:"done"`
+	lastErr     string // not exported
 }
 
 type Task struct {
@@ -35,6 +37,7 @@ type Progress struct {
 	Total      int64
 	Speed      float64 // bytes/sec
 	Chunks     []Chunk
+	Error      string // non-empty when all workers for the task failed
 }
 
 type RateLimiter interface {
@@ -58,6 +61,8 @@ type taskState struct {
 	speed      atomic.Uint64
 	paused     atomic.Bool
 	wg         sync.WaitGroup
+	lastErr    string
+	errMu      sync.Mutex
 }
 
 func (e *Engine) SetLimiter(l RateLimiter) {
@@ -76,24 +81,62 @@ func New() *Engine {
 }
 
 // Probe validates URL via HTTP HEAD: returns total size + Accept-Ranges.
-func Probe(url string) (total int64, acceptRanges bool, filename string, err error) {
+func Probe(url string, headers map[string]string) (total int64, acceptRanges bool, filename string, err error) {
 	req, err := http.NewRequest(http.MethodHead, url, nil)
 	if err != nil {
 		return 0, false, "", err
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+
 	resp, err := http.DefaultClient.Do(req)
+
+	// Fallback ke GET jika HEAD ditolak atau gagal
+	if err != nil || resp.StatusCode >= 400 || resp.ContentLength <= 0 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		req, _ = http.NewRequest(http.MethodGet, url, nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		if req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		}
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("Range", "bytes=0-0")
+		resp, err = http.DefaultClient.Do(req)
+	}
+
 	if err != nil {
 		return 0, false, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, false, "", fmt.Errorf("HEAD %s: %s", url, resp.Status)
+		return 0, false, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
+
 	total = resp.ContentLength
-	acceptRanges = resp.Header.Get("Accept-Ranges") == "bytes"
+	cr := resp.Header.Get("Content-Range")
+	if cr != "" {
+		// e.g. "bytes 0-0/12345678"
+		if idx := strings.Index(cr, "/"); idx != -1 {
+			var parsedTotal int64
+			if _, err := fmt.Sscanf(cr[idx+1:], "%d", &parsedTotal); err == nil && parsedTotal > 0 {
+				total = parsedTotal
+			}
+		}
+	}
+
+	acceptRanges = resp.Header.Get("Accept-Ranges") == "bytes" || resp.StatusCode == http.StatusPartialContent || cr != ""
 	filename = filepath.Base(resp.Request.URL.Path)
-	if filename == "/" || filename == "." {
-		filename = "download.bin"
+	if filename == "/" || filename == "." || len(filename) > 64 {
+		filename = "video.mp4"
 	}
 	return total, acceptRanges, filename, nil
 }
@@ -171,6 +214,7 @@ func (e *Engine) Start(ctx context.Context, task Task, chunks []Chunk) error {
 func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 	defer ts.wg.Done()
 	c := &ts.chunks[i]
+	lastErr := ""
 
 	maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -191,20 +235,37 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 		for k, v := range ts.task.Headers {
 			req.Header.Set(k, v)
 		}
+		if req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		}
 		if ts.task.TotalBytes > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, c.EndOffset))
 		}
 
 		resp, err := e.client.Do(req)
 		if err != nil {
-			time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
-			continue
+			lastErr = fmt.Sprintf("req err: %v", err)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+				continue
+			}
+			ts.errMu.Lock()
+			c.lastErr = lastErr
+			ts.errMu.Unlock()
+			return
 		}
 
 		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
-			continue
+			lastErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+				continue
+			}
+			ts.errMu.Lock()
+			c.lastErr = lastErr
+			ts.errMu.Unlock()
+			return
 		}
 
 		buf := make([]byte, 128*1024)
@@ -225,6 +286,10 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 				}
 				if _, werr := ts.file.WriteAt(buf[:n], start+written); werr != nil {
 					resp.Body.Close()
+					lastErr = fmt.Sprintf("write err: %v", werr)
+					ts.errMu.Lock()
+					c.lastErr = lastErr
+					ts.errMu.Unlock()
 					return
 				}
 				written += int64(n)
@@ -252,6 +317,12 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 
 		time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
 	}
+
+	// Mark chunk done with error
+	ts.errMu.Lock()
+	c.lastErr = lastErr
+	ts.errMu.Unlock()
+	e.stealWork(ctx, ts)
 }
 
 // stealWork finds the slowest chunk and splits its remaining bytes to this worker.
@@ -315,6 +386,7 @@ func (e *Engine) reportLoop(ctx context.Context, ts *taskState) {
 				return
 			}
 			p := e.progressOf(ts)
+			p.Speed = float64(ts.speed.Swap(0)) // reset bytes/sec
 			e.OnUpdate(ts.task.ID, p)
 		}
 	}
@@ -325,11 +397,29 @@ func (e *Engine) progressOf(ts *taskState) Progress {
 	chunks := make([]Chunk, len(ts.chunks))
 	copy(chunks, ts.chunks)
 	e.mu.Unlock()
+
+	ts.errMu.Lock()
+	errStr := ""
+	allFailed := true
+	for _, c := range ts.chunks {
+		if c.lastErr == "" {
+			allFailed = false
+		} else {
+			errStr = c.lastErr
+		}
+	}
+	ts.errMu.Unlock()
+
+	if !allFailed {
+		errStr = ""
+	}
+
 	return Progress{
 		Downloaded: ts.downloaded.Load(),
 		Total:      ts.task.TotalBytes,
-		Speed:      float64(ts.speed.Load()),
+		Speed:      0, // Speed diisi oleh reportLoop per detik
 		Chunks:     chunks,
+		Error:      errStr,
 	}
 }
 

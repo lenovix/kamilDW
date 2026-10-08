@@ -20,6 +20,7 @@ type DownloadPayload struct {
 type Server struct {
 	addr          string
 	server        *http.Server
+	assetFS       http.FileSystem
 	OnDownload    func(payload DownloadPayload) (string, error)
 	OnList        func(category string) (any, error)
 	OnPause       func(id string) bool
@@ -40,6 +41,10 @@ func New(addr string) *Server {
 	}
 }
 
+func (s *Server) SetAssetFS(fs http.FileSystem) {
+	s.assetFS = fs
+}
+
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
@@ -49,8 +54,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/limiter", s.handleLimiter)
 	mux.HandleFunc("/api/events", s.handleEvents)
 
-	fs := http.FileServer(http.Dir("./frontend/dist"))
-	mux.Handle("/", fs)
+	if s.assetFS != nil {
+		mux.Handle("/", http.FileServer(s.assetFS))
+	} else {
+		mux.Handle("/", http.FileServer(http.Dir("./frontend/dist")))
+	}
 
 	s.server = &http.Server{
 		Addr:    s.addr,

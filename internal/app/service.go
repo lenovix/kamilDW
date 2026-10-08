@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -47,9 +48,23 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 
 	eng.OnUpdate = func(taskID string, p engine.Progress) {
 		status := "downloading"
-		if p.Downloaded >= p.Total && p.Total > 0 {
-			status = "completed"
+		allDone := len(p.Chunks) > 0
+		for _, c := range p.Chunks {
+			if !c.Done {
+				allDone = false
+				break
+			}
 		}
+
+		if p.Error != "" {
+			status = "failed"
+		} else if (p.Downloaded >= p.Total && p.Total > 0) || allDone {
+			status = "completed"
+			if p.Total == 0 {
+				p.Total = p.Downloaded
+			}
+		}
+
 		_ = db.UpsertTask(store.TaskRecord{
 			ID:         taskID,
 			Downloaded: p.Downloaded,
@@ -72,7 +87,7 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 		if conn <= 0 {
 			conn = 8
 		}
-		return srv.AddDownload(payload.URL, payload.Filename, conn)
+		return srv.AddDownloadWithHeaders(payload.URL, payload.Filename, conn, payload.Headers)
 	}
 	srv.ext.OnList = func(category string) (any, error) {
 		return srv.List(category)
@@ -125,6 +140,10 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	return srv, nil
 }
 
+func (s *Service) SetAssetFS(fs http.FileSystem) {
+	s.ext.SetAssetFS(fs)
+}
+
 func (s *Service) StartServer() error {
 	return s.ext.Start()
 }
@@ -134,7 +153,7 @@ func (s *Service) AddDownload(rawURL, filename string, connections int) (string,
 }
 
 func (s *Service) AddDownloadWithHeaders(rawURL, filename string, connections int, headers map[string]string) (string, error) {
-	total, acceptRanges, detectedName, err := engine.Probe(rawURL)
+	total, acceptRanges, detectedName, err := engine.Probe(rawURL, headers)
 	if err != nil {
 		total = 0
 		acceptRanges = false

@@ -44,7 +44,7 @@ func TestEngineMultipartWriteAt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	total, acceptRanges, _, err := Probe(srv.URL)
+	total, acceptRanges, _, err := Probe(srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
