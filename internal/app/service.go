@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"kamildw/internal/clipboard"
@@ -175,7 +177,24 @@ func (s *Service) AddDownload(rawURL, filename string, connections int) (string,
 	return s.AddDownloadWithHeaders(rawURL, filename, connections, nil)
 }
 
+func isYouTubeURL(u string) bool {
+	return strings.Contains(u, "youtube.com/watch") || strings.Contains(u, "youtu.be/")
+}
+
 func (s *Service) AddDownloadWithHeaders(rawURL, filename string, connections int, headers map[string]string) (string, error) {
+	if isYouTubeURL(rawURL) {
+		return "", fmt.Errorf("YouTube download currently requires browser extension integration. Use the kamilDW floating widget on the video page.")
+	}
+
+	directURL, resolvedName, rerr := engine.ResolveURL(rawURL)
+	if rerr != nil {
+		return "", rerr
+	}
+	rawURL = directURL
+	if filename == "" && resolvedName != "" {
+		filename = resolvedName
+	}
+
 	total, acceptRanges, detectedName, err := engine.Probe(rawURL, headers)
 	if err != nil {
 		total = 0

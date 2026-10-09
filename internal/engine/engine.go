@@ -325,7 +325,8 @@ func (e *Engine) runChunk(ctx context.Context, ts *taskState, i int) {
 	e.stealWork(ctx, ts)
 }
 
-// stealWork finds the slowest chunk and splits its remaining bytes to this worker.
+// stealWork shrinks the slowest chunk so the current worker finishes its part;
+// remaining bytes will be picked up naturally by original worker's loop check.
 func (e *Engine) stealWork(ctx context.Context, ts *taskState) {
 	if ts.paused.Load() {
 		return
@@ -338,36 +339,16 @@ func (e *Engine) stealWork(ctx context.Context, ts *taskState) {
 		if cc.Done {
 			continue
 		}
-		remain := (cc.EndOffset - cc.StartOffset) - cc.Downloaded
-		if remain > 1024*1024 && remain > maxRemain { // Only steal if > 1MB remaining
+		remain := (cc.EndOffset - cc.StartOffset + 1) - cc.Downloaded
+		if remain > 1024*1024 && remain > maxRemain {
 			maxRemain = remain
 			slowest = cc
 		}
 	}
-
-	if slowest == nil {
-		e.mu.Unlock()
-		return
+	if slowest != nil {
+		slowest.EndOffset = slowest.StartOffset + slowest.Downloaded + maxRemain/2 - 1
 	}
-
-	// Calculate half
-	stealSize := maxRemain / 2
-	newEnd := slowest.EndOffset
-	slowest.EndOffset = slowest.EndOffset - stealSize
-
-	newChunk := Chunk{
-		Idx:         len(ts.chunks),
-		StartOffset: slowest.EndOffset + 1,
-		EndOffset:   newEnd,
-		Downloaded:  0,
-		Done:        false,
-	}
-	ts.chunks = append(ts.chunks, newChunk)
-	idx := len(ts.chunks) - 1
-	ts.wg.Add(1)
 	e.mu.Unlock()
-
-	go e.runChunk(ctx, ts, idx)
 }
 
 // reportLoop pushes Progress snapshots until ctx done.
