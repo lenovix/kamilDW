@@ -2,6 +2,24 @@
 
 Aplikasi Download Manager modern alternatif Internet Download Manager (IDM) berbasis **Go**, **SQLite**, **React**, dan **Wails**.
 
+## 🚀 Core Downloader Modul: `pkg/downloader`
+
+Sebagai referensi porting kode logika dari Xtreme Download Manager (XDM) Java, modul ini menyediakan:
+
+- **Multi-part Segmented Download**: Parser `HEAD` + `Range` request, chunk splitting ke N-parti (default 8-32).
+- **Direct Disk Writing**: Menggunakan `os.File.WriteAt` zero-merge tanpa temp file penggabungan (merge).
+- **Dynamic Work Stealing**: Worker overload/lambat dipindahkan ke rentang byte di baliknya secara online.
+- **Atomic Progress Reporting**: `atomic.Int64` untuk total bytes, kecepatan & persentase, tanpa lock contention.
+- **Resume-aware**: Menyimpan state chunk offline via atomic counters, mendukung pause/resume tanpa data corrupt.
+
+Referensi implementasi di XDM terdapat di: `ref/xdm/xdm-core/src/main/java/xdm/core/downloaders/web/http/HttpDownloader.kt`, `HttpChunkRetriever.kt`, dan `ProgressTracker.kt`.
+
+Struct utama:
+- `pkg/downloader/chunk.go` — state chunk dengan atomic status
+- `pkg/downloader/worker.go` — HTTP Range streaming + WriteAt
+- `pkg/downloader/engine.go` — preflight, truncate, goroutine pool, progress callback
+- `pkg/downloader/downloader.go` — facade publik dengan context cancel & support progress callback
+
 ---
 
 ## 🚀 Fitur Utama
@@ -100,6 +118,15 @@ kamilDW/
 │   ├── limiter/       # Token Bucket speed limiter
 │   ├── media/         # FFmpeg HLS runner
 │   └── store/         # SQLite DAO (tasks & chunks)
+├── pkg/
+│   └── downloader/    # Core Multi-part Downloader Engine (Ported XDM)
+│       ├── chunk.go   # Chunk state & atomic status
+│       ├── downloader.go # Downloader facade & probe
+│       ├── engine.go   # Preflight, pre-alloc, worker pool & atomic metrics
+│       └── worker.go   # Range HTTP streamer & File WriteAt
+├── cmd/
+│   └── download_demo/ # Demo runnable downloader
+├── ref/               # XDM Java Reference Repository
 ├── go.mod
 ├── main.go            # Entrypoint (desktop + web mode)
 ├── wails.json         # Wails config

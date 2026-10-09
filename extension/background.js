@@ -75,12 +75,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const list = tabMediaMap.get(sender.tab.id) || [];
     sendResponse({ media: list });
   } else if (msg.type === "KAMILDW_DOWNLOAD") {
-    sendToKamilDW(msg.url, msg.filename).then((ok) => sendResponse({ ok }));
+    sendToKamilDW(msg.url, msg.filename, msg.savePath).then((ok) => sendResponse({ ok }));
     return true;
   }
 });
 
-async function sendToKamilDW(url, filename = "") {
+async function sendToKamilDW(url, filename = "", savePath = "") {
   try {
     const resp = await fetch(SERVER_URL, {
       method: "POST",
@@ -88,6 +88,7 @@ async function sendToKamilDW(url, filename = "") {
       body: JSON.stringify({
         url,
         filename,
+        savePath,
         headers: {
           "User-Agent": navigator.userAgent,
           "Referer": "https://www.youtube.com/"

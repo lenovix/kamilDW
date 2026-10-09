@@ -12,6 +12,7 @@ import (
 type DownloadPayload struct {
 	URL         string            `json:"url"`
 	Filename    string            `json:"filename,omitempty"`
+	SavePath    string            `json:"savePath,omitempty"`
 	Headers     map[string]string `json:"headers,omitempty"`
 	IsHLS       bool              `json:"isHls,omitempty"`
 	Connections int               `json:"connections,omitempty"`
@@ -28,6 +29,7 @@ type Server struct {
 	OnResume      func(id string) bool
 	OnDelete      func(id string) bool
 	OnSetSpeed    func(bytesPerSec int64)
+	OnProbe       func(url string, headers map[string]string) (int64, bool, string, error)
 	mu            sync.Mutex
 	listeners     map[chan any]struct{}
 }
@@ -55,6 +57,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/limiter", s.handleLimiter)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/db", s.handleDB)
+	mux.HandleFunc("/api/probe", s.handleProbe)
 
 	if s.assetFS != nil {
 		mux.Handle("/", http.FileServer(s.assetFS))
@@ -246,6 +249,43 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if s.OnProbe == nil {
+		json.NewEncoder(w).Encode(map[string]any{"total": 0, "acceptRanges": false, "filename": "download.bin"})
+		return
+	}
+	total, acceptRanges, filename, err := s.OnProbe(req.URL, req.Headers)
+	if err != nil {
+		total = 0
+		acceptRanges = false
+		if filename == "" {
+			filename = "download.bin"
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"total":        total,
+		"acceptRanges": acceptRanges,
+		"filename":     filename,
+	})
 }
 
 func (s *Server) Broadcast(msg any) {

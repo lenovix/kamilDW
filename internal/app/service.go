@@ -90,7 +90,7 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 		if conn <= 0 {
 			conn = 8
 		}
-		return srv.AddDownloadWithHeaders(payload.URL, payload.Filename, conn, payload.Headers)
+		return srv.AddDownloadWithOptions(payload.URL, payload.Filename, payload.SavePath, conn, payload.Headers)
 	}
 	srv.ext.OnList = func(category string) (any, error) {
 		return srv.List(category)
@@ -142,6 +142,20 @@ func NewService(dbPath string, downloadDir string) (*Service, error) {
 	srv.ext.OnSetSpeed = func(bytesPerSec int64) {
 		srv.limiter.SetRate(bytesPerSec)
 	}
+	srv.ext.OnProbe = func(url string, headers map[string]string) (int64, bool, string, error) {
+		if isYouTubeURL(url) {
+			return 0, false, "video.mp4", nil
+		}
+		directURL, resolvedName, rerr := engine.ResolveURL(url)
+		if rerr == nil {
+			url = directURL
+		}
+		total, acceptRanges, detectedName, err := engine.Probe(url, headers)
+		if resolvedName != "" {
+			detectedName = resolvedName
+		}
+		return total, acceptRanges, detectedName, err
+	}
 	srv.ext.OnDelete = func(id string) bool {
 		_ = srv.eng.Cancel(id)
 		err := srv.db.DeleteTask(id)
@@ -173,15 +187,19 @@ func (s *Service) StartServer() error {
 	return s.ext.Start()
 }
 
-func (s *Service) AddDownload(rawURL, filename string, connections int) (string, error) {
-	return s.AddDownloadWithHeaders(rawURL, filename, connections, nil)
-}
-
 func isYouTubeURL(u string) bool {
 	return strings.Contains(u, "youtube.com/watch") || strings.Contains(u, "youtu.be/")
 }
 
+func (s *Service) AddDownload(rawURL, filename string, connections int) (string, error) {
+	return s.AddDownloadWithOptions(rawURL, filename, "", connections, nil)
+}
+
 func (s *Service) AddDownloadWithHeaders(rawURL, filename string, connections int, headers map[string]string) (string, error) {
+	return s.AddDownloadWithOptions(rawURL, filename, "", connections, headers)
+}
+
+func (s *Service) AddDownloadWithOptions(rawURL, filename, savePath string, connections int, headers map[string]string) (string, error) {
 	if isYouTubeURL(rawURL) {
 		return "", fmt.Errorf("YouTube download currently requires browser extension integration. Use the kamilDW floating widget on the video page.")
 	}
@@ -207,10 +225,17 @@ func (s *Service) AddDownloadWithHeaders(rawURL, filename string, connections in
 	if filename == "" {
 		filename = detectedName
 	}
-	cat := store.Categorize(filename)
-	destDir := filepath.Join(s.downloads, cat)
+
+	var destDir string
+	if savePath != "" {
+		destDir = savePath
+	} else {
+		cat := store.Categorize(filename)
+		destDir = filepath.Join(s.downloads, cat)
+	}
 	_ = os.MkdirAll(destDir, 0o755)
 	destPath := filepath.Join(destDir, filename)
+	cat := store.Categorize(filename)
 
 	b := make([]byte, 8)
 	rand.Read(b)
